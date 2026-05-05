@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SEO Dashboard для CEO — Новые Клиенты из органики</title>
+<link rel="stylesheet" href="styles.css">
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body>
+<header class="topbar">
+  <h1>SEO Dashboard <span class="muted">— Новые Клиенты из органики</span></h1>
+  <div class="topbar-actions">
+    <button id="btnReset" class="btn btn-ghost" title="Сбросить загруженные данные и фильтры">⟲ Сбросить</button>
+    <button id="btnExport" class="btn" title="Выгрузить детальную таблицу">⤓ Excel/CSV</button>
+  </div>
+</header>
+
+<section id="dropzone" class="dropzone">
+  <div>
+    <div class="dz-title">Перетащите сюда .xlsx / .csv</div>
+    <div class="dz-sub">или <label class="link" for="fileInput">выберите файл</label></div>
+    <input id="fileInput" type="file" accept=".xlsx,.xls,.csv" hidden>
+    <div class="dz-hint">Файл сохраняется в браузере (localStorage). При обновлении страницы данные и фильтры не сбрасываются.</div>
+  </div>
+</section>
+
+<main id="dashboard" hidden>
+
+  <!-- 4.1 Filters -->
+  <section class="filters card">
+    <div class="filter">
+      <label>Месяц</label>
+      <div id="filterMonths" class="chips" role="group" aria-label="Месяцы"></div>
+    </div>
+    <div class="filter">
+      <label>Источник трафика</label>
+      <div id="filterSources" class="chips" role="group" aria-label="Источники"></div>
+    </div>
+    <div class="filter">
+      <label>Страница / продукт</label>
+      <div id="filterPages" class="chips" role="group" aria-label="Страницы"></div>
+    </div>
+    <button id="btnClearFilters" class="btn btn-ghost small">Очистить фильтры</button>
+  </section>
+
+  <!-- 4.2 KPI Summary -->
+  <section class="kpis">
+    <div class="kpi card" id="kpiNk">
+      <div class="kpi-label">Всего Новых Клиентов (НК)</div>
+      <div class="kpi-value">—</div>
+      <div class="kpi-delta"></div>
+      <div class="kpi-sub">главный показатель для CEO</div>
+    </div>
+    <div class="kpi card" id="kpiVisits">
+      <div class="kpi-label">Всего Визитов</div>
+      <div class="kpi-value">—</div>
+      <div class="kpi-delta"></div>
+      <div class="kpi-sub">объём органического трафика</div>
+    </div>
+    <div class="kpi card" id="kpiCr">
+      <div class="kpi-label">Общий CR</div>
+      <div class="kpi-value">—</div>
+      <div class="kpi-delta"></div>
+      <div class="kpi-sub">конверсия визита в заявку</div>
+    </div>
+    <div class="kpi card" id="kpiAr">
+      <div class="kpi-label">Общий AR</div>
+      <div class="kpi-value">—</div>
+      <div class="kpi-delta"></div>
+      <div class="kpi-sub">Approve Rate — качество лидов</div>
+    </div>
+  </section>
+
+  <!-- 4.3 Charts -->
+  <section class="charts">
+    <div class="card chart-card">
+      <h3>Воронка SEO: Показы → Визиты → Заявки → НК</h3>
+      <div class="chart-wrap"><canvas id="chartFunnel"></canvas></div>
+      <p class="chart-note">На каком этапе мы теряем пользователей поисковых систем.</p>
+    </div>
+
+    <div class="card chart-card">
+      <h3>Динамика НК по источникам</h3>
+      <div class="chart-wrap"><canvas id="chartTrend"></canvas></div>
+      <p class="chart-note">Какая поисковая система генерирует больше реальных клиентов.</p>
+    </div>
+
+    <div class="card chart-card">
+      <h3>Корреляция «Трафик ↔ НК»</h3>
+      <div class="chart-wrap"><canvas id="chartCombo"></canvas></div>
+      <p class="chart-note">Рост SEO-трафика прямо пропорционален росту базы Новых Клиентов.</p>
+    </div>
+
+    <div class="card chart-card">
+      <h3>Эффективность продуктов / кластеров</h3>
+      <div class="chart-wrap"><canvas id="chartProducts"></canvas></div>
+      <p class="chart-note">Где самый качественный трафик из поиска (по НК и AR).</p>
+    </div>
+  </section>
+
+  <!-- 5. Insights -->
+  <section class="card insights">
+    <h3>🔎 Инсайты</h3>
+    <ul id="insightsList"></ul>
+  </section>
+
+  <!-- 4.4 Data grid -->
+  <section class="card">
+    <div class="grid-head">
+      <h3>Детализация</h3>
+      <span class="muted small" id="gridMeta"></span>
+    </div>
+    <div class="grid-wrap">
+      <table id="dataGrid"><thead></thead><tbody></tbody></table>
+    </div>
+  </section>
+
+  <footer class="footer muted small">
+    Источник данных: <span id="srcName">—</span> · обработано строк: <span id="srcRows">0</span>
+  </footer>
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>
