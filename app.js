@@ -1035,7 +1035,7 @@ function renderRankingEngineFilter(detail){
   if (!host) return;
   const engines = [...new Set(detail.map(d => d.engine).filter(Boolean))];
   if (engines.length < 2){ host.innerHTML = ''; return; }
-  if (!state.ui.rankingEngine || (state.ui.rankingEngine && !engines.includes(state.ui.rankingEngine) && state.ui.rankingEngine !== '')){
+  if (!state.ui.rankingEngine || !engines.includes(state.ui.rankingEngine)){
     state.ui.rankingEngine = '';
   }
   const opts = [{ v:'', label:'Все системы' }, ...engines.map(e => ({ v:e, label:e }))];
@@ -1234,24 +1234,29 @@ function renderInsights(){
   }
 
   // 4. Positions ↔ NK correlation alert (cross-module: Позиции + Воронка)
-  // Scans the detailed positions sheet for clusters whose avg position improved
-  // most month-over-month and ties that to the parallel change in total НК.
+  // Scans the detailed positions sheet for (cluster, engine) pairs whose avg position
+  // improved most month-over-month and ties that to the parallel change in total НК.
   const detail = state.positionsDetail || [];
   if (detail.length && monthly.length >= 2){
     const m1 = monthly[monthly.length-2].month;
     const m2 = monthly[monthly.length-1].month;
-    const byCluster = new Map();
+    // Key by cluster+engine so a cluster ranked in both Яндекс and Google produces
+    // separate comparison candidates and the alert never misattributes the engine.
+    const byCe = new Map();
     for (const d of detail){
       if (d.avgPos == null || !d.cluster) continue;
       if (d.month !== m1 && d.month !== m2) continue;
-      if (!byCluster.has(d.cluster)) byCluster.set(d.cluster, {});
-      byCluster.get(d.cluster)[d.month] = d;
+      const k = (d.cluster||'') + '||' + (d.engine||'');
+      if (!byCe.has(k)) byCe.set(k, { cluster:d.cluster, engine:d.engine });
+      byCe.get(k)[d.month] = d;
     }
     let best = null;
-    for (const [name, pair] of byCluster.entries()){
-      if (!pair[m1] || !pair[m2]) continue;
-      const dPos = pair[m1].avgPos - pair[m2].avgPos; // positive = поднялись
-      if (best == null || dPos > best.dPos){ best = { name, dPos, before:pair[m1].avgPos, after:pair[m2].avgPos, engine: pair[m2].engine }; }
+    for (const v of byCe.values()){
+      if (!v[m1] || !v[m2]) continue;
+      const dPos = v[m1].avgPos - v[m2].avgPos; // positive = поднялись (меньше = лучше)
+      if (best == null || dPos > best.dPos){
+        best = { name:v.cluster, engine:v.engine, dPos, before:v[m1].avgPos, after:v[m2].avgPos };
+      }
     }
     if (best && best.dPos > 0.5){
       const dNk = monthly[monthly.length-1].nk - monthly[monthly.length-2].nk;
@@ -1261,7 +1266,7 @@ function renderInsights(){
       const nkTxt = dNk > 0
         ? ` Это совпало с приростом <b>+${fmtInt(dNk)}</b> Новых Клиентов.`
         : ` При этом база НК изменилась на <b>${dNk>=0?'+':''}${fmtInt(dNk)}</b>.`;
-      const engineTxt = best.engine ? ` (${esc(best.engine)})` : '';
+      const engineTxt = best.engine ? ` в ${esc(best.engine)}` : '';
       li(ul, `🚀 Мы выросли${engineTxt} по кластеру <b>${esc(best.name)}</b>: средняя позиция улучшилась с ${best.before.toFixed(1)} до ${best.after.toFixed(1)} (${m1} → ${m2}).${tgTxt}${nkTxt}`);
     }
   }
