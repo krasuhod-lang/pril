@@ -544,6 +544,8 @@ function renderInsights(){
     }
   }
 }
+// Helper for inserting an insight as <li>. Callers MUST pass HTML-safe content
+// (use esc() on any user/data-derived strings). Used only by renderInsights().
 function li(ul, html){ const el = document.createElement('li'); el.innerHTML = html; ul.appendChild(el); }
 
 /* -------------------- Data grid -------------------- */
