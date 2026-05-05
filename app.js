@@ -21,10 +21,13 @@ const SOURCE_COLORS = { 'Яндекс':'#fc3f1d', 'Google':'#4285f4', 'Organic':
 
 let state = {
   rows: [],            // normalized rows
-  positions: [],       // [{ month, top5, top10, top50, ai }]
-  socdem: [],          // [{ segment, gender, age, geo, interests, loan, visits, cr }]
+  positions: [],       // legacy: [{ month, top5, top10, top50, ai }]
+  positionsDetail: [], // new schema: [{ month, cluster, engine, avgPos, visibility }]
+  socdem: [],          // legacy portrait: [{ segment, gender, age, geo, ... }]
+  socdemFunnel: [],    // new schema: [{ gender, age, device, visits, requests, nk, ar }]
   fileName: '',
-  filters: { months: [], sources: [], pages: [] }
+  filters: { months: [], sources: [], pages: [] },
+  ui: { heatMetric: 'ar', rankingEngine: '' }
 };
 const charts = {};
 
@@ -90,8 +93,10 @@ function parseWorkbook(arrayBuffer){
 
   return {
     main: target.json,
-    positions: positionsSheet ? parsePositions(wb.Sheets[positionsSheet.name]) : [],
-    socdem:    socdemSheet    ? parseSocdem(wb.Sheets[socdemSheet.name])       : [],
+    positions:       positionsSheet ? parsePositions(wb.Sheets[positionsSheet.name]) : [],
+    positionsDetail: positionsSheet ? parsePositionsDetail(wb.Sheets[positionsSheet.name]) : [],
+    socdem:          socdemSheet    ? parseSocdem(wb.Sheets[socdemSheet.name])       : [],
+    socdemFunnel:    socdemSheet    ? parseSocdemFunnel(wb.Sheets[socdemSheet.name]) : [],
   };
 }
 
@@ -106,6 +111,9 @@ function parsePositions(sheet){
     top50: header.findIndex(h => /топ\s*50\b/i.test(h)),
     ai:    header.findIndex(h => /ии|ai|нейросет/i.test(h)),
   };
+  // If none of the legacy TOP-N columns is present, this is the new long-form
+  // schema (date / cluster / engine / avg pos) — handled by parsePositionsDetail.
+  if (idx.top5 < 0 && idx.top10 < 0 && idx.top50 < 0 && idx.ai < 0) return [];
   const out = [];
   for (let i = 1; i < aoa.length; i++){
     const row = aoa[i] || [];
@@ -122,8 +130,53 @@ function parsePositions(sheet){
   return out;
 }
 
+/* New positions schema: long-form rows with date, cluster, engine, avg position, visibility.
+ * Recognised columns:
+ *   Дата / Месяц / Date; Кластер / Запрос / Cluster / Query;
+ *   Поисковая система / Engine / Source (Яндекс|Google);
+ *   Средняя позиция / Avg pos / Position; Видимость / Visibility (% in TOP-10).
+ * Returns [] when the sheet doesn't carry these columns; legacy TOP-N counts continue
+ * to drive the old "Позиции" widget. */
+function parsePositionsDetail(sheet){
+  const json = XLSX.utils.sheet_to_json(sheet, { defval:null, raw:true });
+  if (!json.length) return [];
+  const sample = json[0];
+  const keys = Object.keys(sample);
+  const has = re => keys.some(k => re.test(String(k)));
+  // Require at least the position metric. Cluster/engine are optional but typical.
+  if (!has(/средняя\s*позиц|avg.?pos|позиция/i)) return [];
+
+  const out = [];
+  for (const r of json){
+    const month   = monthKey(pickField(r, /^дата$|^месяц$|date|month/i));
+    if (!month) continue;
+    const cluster = str(pickField(r, /кластер|запрос|cluster|query|keyword/i));
+    const engine  = normEngine(str(pickField(r, /поисков|engine|source|система/i)));
+    const avgPos  = toNumber(pickField(r, /средняя\s*позиц|avg.?pos|^позиция$/i));
+    let visibility= toNumber(pickField(r, /видимост|visibility/i));
+    if (visibility != null && Math.abs(visibility) > 1.5) visibility = visibility/100;
+    if (avgPos == null) continue;
+    out.push({ month, cluster, engine, avgPos, visibility });
+  }
+  return out;
+}
+
+function normEngine(s){
+  if (!s) return '';
+  const t = s.toLowerCase();
+  if (/яндекс|yandex/.test(t)) return 'Яндекс';
+  if (/google|гугл/.test(t)) return 'Google';
+  return s;
+}
+
 function parseSocdem(sheet){
   const json = XLSX.utils.sheet_to_json(sheet, { defval:null, raw:true });
+  if (!json.length) return [];
+  // If the sheet uses the new funnel schema (no Сегмент column, but has gender/age + metrics),
+  // skip legacy portrait extraction so renderSocdem stays hidden.
+  const keys = Object.keys(json[0] || {});
+  const hasSegment = keys.some(k => /сегмент|segment/i.test(k));
+  if (!hasSegment) return [];
   const out = [];
   for (const r of json){
     const seg = pickField(r, /сегмент|segment/i);
@@ -140,6 +193,82 @@ function parseSocdem(sheet){
     });
   }
   return out;
+}
+
+/* New schema: per-segment funnel metrics with gender × age × device.
+ * Recognised columns (case-insensitive, partial match):
+ *   Пол / Gender; Возраст / Возрастная группа / Age;
+ *   Устройство / Тип устройства / Device;
+ *   Визиты / Visits; Заявки / Requests; НК / Новые клиенты;
+ *   AR / Approve; CR (опционально).
+ * Returns [] when none of the funnel-metric columns is present —
+ * in that case the legacy "portrait" view is used instead. */
+function parseSocdemFunnel(sheet){
+  const json = XLSX.utils.sheet_to_json(sheet, { defval:null, raw:true });
+  if (!json.length) return [];
+  const sample = json[0];
+  const keys = Object.keys(sample);
+  const has = re => keys.some(k => re.test(String(k)));
+  // Need at least one of the funnel metrics + gender or age or device dimension.
+  const hasMetric = has(/^нк$|новые\s*клиент|^ar$|approve|^визит|visits/i);
+  const hasDim    = has(/^пол$|gender|возраст|age|устройств|device/i);
+  if (!hasMetric || !hasDim) return [];
+
+  const out = [];
+  for (const r of json){
+    const gender = str(pickField(r, /^пол$|gender/i));
+    const age    = normAgeBucket(str(pickField(r, /возрастн|^возраст$|age/i)));
+    const device = normDevice(str(pickField(r, /устройств|device/i)));
+    if (!gender && !age && !device) continue;
+    let visits  = toNumber(pickField(r, /^визит|visits/i));
+    let reqs    = toNumber(pickField(r, /^заявк|requests?/i));
+    let nk      = toNumber(pickField(r, /^нк$|новые\s*клиент/i));
+    let ar      = toNumber(pickField(r, /^ar$|approve/i));
+    let cr      = toNumber(pickField(r, /^cr$|конверс/i));
+    // Skip rows that have no metrics at all
+    if (visits == null && reqs == null && nk == null && ar == null) continue;
+    // Percentages may come in as 0..100
+    if (ar != null && Math.abs(ar) > 1.5) ar = ar/100;
+    if (cr != null && Math.abs(cr) > 1.5) cr = cr/100;
+    // Derive AR if missing but we have NK + Заявки
+    if (ar == null && nk != null && reqs) ar = nk/reqs;
+    if (cr == null && reqs != null && visits) cr = reqs/visits;
+    out.push({ gender, age, device, visits, reqs, nk, ar, cr });
+  }
+  return out;
+}
+
+function normAgeBucket(s){
+  if (!s) return '';
+  const t = s.replace(/\s+/g,'').replace(/[–—−]/g,'-');
+  // Map a free-form age expression to one of the standard buckets when possible.
+  // Multiple buckets (e.g. "22-34, 35-42") collapse to the first one for grouping.
+  const buckets = ['18-24','25-34','35-44','45-54','55+'];
+  // Take first numeric token to classify; supports "22-34", "55+", "22-34,35-42", "60+"
+  const m = t.match(/(\d+)/);
+  if (!m) return s;
+  const n = parseInt(m[1],10);
+  if (n >= 18 && n <= 24) return '18-24';
+  if (n >= 25 && n <= 34) return '25-34';
+  if (n >= 35 && n <= 44) return '35-44';
+  if (n >= 45 && n <= 54) return '45-54';
+  if (n >= 55) return '55+';
+  return buckets.includes(t) ? t : s;
+}
+function normGender(s){
+  if (!s) return '';
+  const t = s.toLowerCase();
+  if (/^муж|^m\b|male/.test(t)) return 'Мужской';
+  if (/^жен|^ж\b|^f\b|female/.test(t)) return 'Женский';
+  return s;
+}
+function normDevice(s){
+  if (!s) return '';
+  const t = s.toLowerCase();
+  if (/mobile|моб|смартф|phone/.test(t)) return 'Mobile';
+  if (/desktop|десктоп|пк|computer/.test(t)) return 'Desktop';
+  if (/tablet|планшет/.test(t)) return 'Tablet';
+  return s;
 }
 
 function pickField(row, re){
@@ -264,9 +393,12 @@ function loadState(){
     const parsed = JSON.parse(s);
     if (parsed && Array.isArray(parsed.rows) && parsed.rows.length){
       state = Object.assign(state, parsed);
-      state.positions = Array.isArray(parsed.positions) ? parsed.positions : [];
-      state.socdem    = Array.isArray(parsed.socdem)    ? parsed.socdem    : [];
+      state.positions       = Array.isArray(parsed.positions)       ? parsed.positions       : [];
+      state.positionsDetail = Array.isArray(parsed.positionsDetail) ? parsed.positionsDetail : [];
+      state.socdem          = Array.isArray(parsed.socdem)          ? parsed.socdem          : [];
+      state.socdemFunnel    = Array.isArray(parsed.socdemFunnel)    ? parsed.socdemFunnel    : [];
       state.filters = Object.assign({months:[],sources:[],pages:[]}, parsed.filters||{});
+      state.ui      = Object.assign({heatMetric:'ar',rankingEngine:''}, parsed.ui||{});
       return true;
     }
   } catch(e){}
@@ -274,7 +406,9 @@ function loadState(){
 }
 function clearState(){
   localStorage.removeItem(LS_KEY);
-  state = { rows:[], positions:[], socdem:[], fileName:'', filters:{months:[],sources:[],pages:[]} };
+  state = { rows:[], positions:[], positionsDetail:[], socdem:[], socdemFunnel:[],
+            fileName:'', filters:{months:[],sources:[],pages:[]},
+            ui:{heatMetric:'ar',rankingEngine:''} };
 }
 
 /* -------------------- Filters UI -------------------- */
@@ -686,6 +820,375 @@ function renderSocdem(){
   }).join('');
 }
 
+/* -------------------- Audience (Соц-дем funnel) -------------------- */
+const AGE_BUCKETS    = ['18-24','25-34','35-44','45-54','55+'];
+const GENDER_BUCKETS = ['Мужской','Женский'];
+const DEVICE_COLORS  = { 'Mobile':'#2563eb', 'Desktop':'#16a34a', 'Tablet':'#d97706' };
+
+function aggSocdemBy(rows, keyFn){
+  const m = new Map();
+  for (const r of rows){
+    const k = keyFn(r);
+    if (k == null) continue;
+    if (!m.has(k)) m.set(k, { visits:0, reqs:0, nk:0 });
+    const acc = m.get(k);
+    if (r.visits != null) acc.visits += r.visits;
+    if (r.reqs   != null) acc.reqs   += r.reqs;
+    if (r.nk     != null) acc.nk     += r.nk;
+  }
+  // Recompute CR/AR from totals (more accurate than averaging per-row rates).
+  for (const v of m.values()){
+    v.cr = v.visits ? v.reqs/v.visits : null;
+    v.ar = v.reqs   ? v.nk  /v.reqs   : null;
+  }
+  return m;
+}
+
+function renderAudience(){
+  const section = $('#sectionAudience');
+  const rows = (state.socdemFunnel || []).map(r => ({
+    ...r,
+    gender: normGender(r.gender),
+    age:    normAgeBucket(r.age),
+    device: normDevice(r.device),
+  }));
+  if (!rows.length){
+    if (section) section.hidden = true;
+    destroyChart('deviceShare'); destroyChart('deviceCr');
+    return;
+  }
+  if (section) section.hidden = false;
+
+  // 1) Heatmap by Пол × Возраст
+  renderHeatmap(rows);
+
+  // 2) Donut: доля визитов по устройствам
+  const byDevice = aggSocdemBy(rows.filter(r => r.device), r => r.device);
+  const devices = [...byDevice.keys()];
+  destroyChart('deviceShare');
+  if (devices.length){
+    charts.deviceShare = new Chart($('#chartDeviceShare'), {
+      type:'doughnut',
+      data:{
+        labels: devices,
+        datasets:[{
+          data: devices.map(d => byDevice.get(d).visits),
+          backgroundColor: devices.map(d => DEVICE_COLORS[d] || '#7c3aed'),
+          borderWidth:1, borderColor:'#fff'
+        }]
+      },
+      options:{
+        responsive:true, maintainAspectRatio:false, cutout:'60%',
+        plugins:{
+          legend:{position:'bottom'},
+          tooltip:{ callbacks:{
+            label: ctx => {
+              const total = ctx.dataset.data.reduce((s,v)=>s+(+v||0),0) || 1;
+              const v = +ctx.raw || 0;
+              return `${ctx.label}: ${fmtInt(v)} (${(v/total*100).toFixed(1)}%)`;
+            }
+          }}
+        }
+      }
+    });
+  }
+
+  // 3) Bar: CR / AR по устройствам
+  destroyChart('deviceCr');
+  if (devices.length){
+    charts.deviceCr = new Chart($('#chartDeviceCr'), {
+      type:'bar',
+      data:{
+        labels: devices,
+        datasets:[
+          { label:'CR (визит → заявка), %', data: devices.map(d => (byDevice.get(d).cr||0)*100),
+            backgroundColor:'#93c5fd', borderColor:'#2563eb', borderWidth:1 },
+          { label:'AR (заявка → НК), %',     data: devices.map(d => (byDevice.get(d).ar||0)*100),
+            backgroundColor:'#86efac', borderColor:'#16a34a', borderWidth:1 },
+        ]
+      },
+      options:{
+        responsive:true, maintainAspectRatio:false,
+        plugins:{
+          legend:{position:'bottom'},
+          tooltip:{ callbacks:{ label: ctx => `${ctx.dataset.label}: ${(+ctx.raw||0).toFixed(2)}%` } }
+        },
+        scales:{ y:{ beginAtZero:true, ticks:{ callback:v => v+'%' } } }
+      }
+    });
+  }
+
+  // 4) Detailed table
+  renderAudienceTable(rows);
+}
+
+function renderHeatmap(rows){
+  // Pivot AR / NK over Пол × Возраст. Skip rows with unknown gender or age.
+  const buckets = new Map();
+  for (const r of rows){
+    if (!GENDER_BUCKETS.includes(r.gender) || !AGE_BUCKETS.includes(r.age)) continue;
+    const k = r.gender + '||' + r.age;
+    if (!buckets.has(k)) buckets.set(k, { visits:0, reqs:0, nk:0 });
+    const acc = buckets.get(k);
+    if (r.visits != null) acc.visits += r.visits;
+    if (r.reqs   != null) acc.reqs   += r.reqs;
+    if (r.nk     != null) acc.nk     += r.nk;
+  }
+  for (const v of buckets.values()){ v.ar = v.reqs ? v.nk/v.reqs : null; }
+
+  const metric = state.ui.heatMetric || 'ar';
+  // Determine value range for color scaling
+  let maxVal = 0;
+  for (const v of buckets.values()){
+    const x = metric === 'ar' ? (v.ar || 0) : (v.nk || 0);
+    if (x > maxVal) maxVal = x;
+  }
+
+  const host = $('#heatmap');
+  if (!host) return;
+  // Build CSS grid: 1 (label) + N gender columns
+  const cols = ['', ...GENDER_BUCKETS];
+  host.style.gridTemplateColumns = `120px repeat(${GENDER_BUCKETS.length}, 1fr)`;
+  let html = '';
+  // header row
+  html += cols.map((c,i) => `<div class="heatmap-cell head">${i===0?'':esc(c)}</div>`).join('');
+  for (const age of AGE_BUCKETS){
+    html += `<div class="heatmap-cell head" style="text-align:left">${esc(age)}</div>`;
+    for (const g of GENDER_BUCKETS){
+      const cell = buckets.get(g+'||'+age);
+      if (!cell || (metric==='ar' && cell.ar==null) || (metric==='nk' && !cell.nk)){
+        html += `<div class="heatmap-cell empty"><span class="v">—</span><span class="s">нет данных</span></div>`;
+        continue;
+      }
+      const val   = metric === 'ar' ? cell.ar : cell.nk;
+      const ratio = maxVal > 0 ? Math.min(1, val / maxVal) : 0;
+      const bg    = heatColor(ratio);
+      const fg    = ratio > 0.55 ? '#fff' : '#0f172a';
+      const main  = metric === 'ar' ? fmtPct(cell.ar) : fmtInt(cell.nk);
+      const sub   = metric === 'ar'
+        ? `${fmtInt(cell.nk)} НК · ${fmtInt(cell.reqs)} заявок`
+        : `AR ${fmtPct(cell.ar)}`;
+      html += `<div class="heatmap-cell" style="background:${bg};color:${fg};border-color:${bg}"
+                 title="${esc(g)} · ${esc(age)}">
+                 <span class="v">${main}</span>
+                 <span class="s">${sub}</span>
+               </div>`;
+    }
+  }
+  host.innerHTML = html;
+}
+
+// Map ratio 0..1 → color from light blue to deep brand-blue.
+function heatColor(r){
+  // Linear interpolation between #eff6ff and #1e3a8a in sRGB.
+  const a = [239,246,255], b = [30,58,138];
+  const c = a.map((x,i) => Math.round(x + (b[i]-x) * r));
+  return `rgb(${c[0]},${c[1]},${c[2]})`;
+}
+
+function renderAudienceTable(rows){
+  const tbl = $('#audienceTable');
+  if (!tbl) return;
+  // Show every row with at least one metric; sort by AR desc, then NK desc.
+  const sorted = [...rows]
+    .filter(r => r.ar != null || r.nk != null || r.visits != null)
+    .sort((a,b) => (b.ar||0) - (a.ar||0) || (b.nk||0) - (a.nk||0));
+  tbl.innerHTML =
+    '<thead><tr>' +
+      '<th class="txt">Пол</th><th class="txt">Возраст</th><th class="txt">Устройство</th>' +
+      '<th>Визиты</th><th>Заявки</th><th>НК</th><th>CR</th><th>AR</th>' +
+    '</tr></thead><tbody>' +
+    sorted.map(r => `<tr>
+      <td class="txt">${esc(r.gender||'—')}</td>
+      <td class="txt">${esc(r.age||'—')}</td>
+      <td class="txt">${esc(r.device||'—')}</td>
+      <td>${fmtInt(r.visits)}</td>
+      <td>${fmtInt(r.reqs)}</td>
+      <td>${fmtInt(r.nk)}</td>
+      <td>${r.cr != null ? fmtPct(r.cr) : '—'}</td>
+      <td>${r.ar != null ? fmtPct(r.ar) : '—'}</td>
+    </tr>`).join('') +
+    '</tbody>';
+}
+
+/* -------------------- Ranking (Позиции ↔ НК) -------------------- */
+function renderRanking(){
+  const section = $('#sectionRanking');
+  const detail = state.positionsDetail || [];
+  const legacy = state.positions || [];
+  // We need either the detailed schema (avg position per month) or, as a graceful
+  // fallback, the legacy TOP-N counts to drive the stacked-bucket chart.
+  if (!detail.length && !legacy.length){
+    if (section) section.hidden = true;
+    destroyChart('rankingCorr'); destroyChart('rankingBuckets');
+    return;
+  }
+  if (section) section.hidden = false;
+
+  renderRankingEngineFilter(detail);
+  renderRankingCorrelation(detail);
+  renderRankingBuckets(detail, legacy);
+}
+
+function renderRankingEngineFilter(detail){
+  const host = $('#rankingEngineFilter');
+  if (!host) return;
+  const engines = [...new Set(detail.map(d => d.engine).filter(Boolean))];
+  if (engines.length < 2){ host.innerHTML = ''; return; }
+  if (!state.ui.rankingEngine || (state.ui.rankingEngine && !engines.includes(state.ui.rankingEngine) && state.ui.rankingEngine !== '')){
+    state.ui.rankingEngine = '';
+  }
+  const opts = [{ v:'', label:'Все системы' }, ...engines.map(e => ({ v:e, label:e }))];
+  host.innerHTML = opts.map(o =>
+    `<label class="radio"><input type="radio" name="rankingEngine" value="${esc(o.v)}"
+       ${state.ui.rankingEngine === o.v ? 'checked' : ''}> ${esc(o.label)}</label>`
+  ).join('');
+  host.querySelectorAll('input[name=rankingEngine]').forEach(el => {
+    el.addEventListener('change', e => {
+      state.ui.rankingEngine = e.target.value;
+      saveState();
+      renderRankingCorrelation(state.positionsDetail || []);
+    });
+  });
+}
+
+function renderRankingCorrelation(detail){
+  destroyChart('rankingCorr');
+  const canvas = $('#chartRankingCorr');
+  if (!canvas) return;
+
+  const engineFilter = state.ui.rankingEngine || '';
+  const filtered = engineFilter ? detail.filter(d => d.engine === engineFilter) : detail;
+
+  // Average position per month across the filtered slice (mean of per-row avgPos).
+  const posByMonth = new Map();
+  for (const d of filtered){
+    if (d.avgPos == null) continue;
+    if (!posByMonth.has(d.month)) posByMonth.set(d.month, { sum:0, n:0 });
+    const a = posByMonth.get(d.month);
+    a.sum += d.avgPos; a.n += 1;
+  }
+  // НК per month from main data, restricted by current page/source filters.
+  const monthly = aggregateByMonth(applyFilters(state.rows));
+
+  // Months present in either source, ordered chronologically.
+  const monthsSet = new Set([...monthly.map(m=>m.month), ...posByMonth.keys()]);
+  const months = sortMonths([...monthsSet]);
+  if (!months.length) return;
+
+  const nkSeries  = months.map(m => {
+    const hit = monthly.find(x => x.month === m); return hit ? hit.nk : 0;
+  });
+  const posSeries = months.map(m => {
+    const a = posByMonth.get(m); return a ? a.sum/a.n : null;
+  });
+
+  const hasPos = posSeries.some(v => v != null);
+  const datasets = [
+    { type:'bar', label:'НК (Новые клиенты)', data: nkSeries,
+      backgroundColor:'#93c5fd', borderColor:'#2563eb', borderWidth:1, yAxisID:'y' },
+  ];
+  if (hasPos){
+    datasets.push({
+      type:'line',
+      label:'Средняя позиция' + (engineFilter ? ' · '+engineFilter : ''),
+      data: posSeries,
+      borderColor:'#dc2626', backgroundColor:'#dc2626',
+      borderWidth:2, tension:.3, pointRadius:4, spanGaps:true, yAxisID:'y1'
+    });
+  }
+
+  charts.rankingCorr = new Chart(canvas, {
+    data:{ labels: months, datasets },
+    options:{
+      responsive:true, maintainAspectRatio:false,
+      plugins:{
+        legend:{position:'bottom'},
+        tooltip:{ callbacks:{
+          label: ctx => ctx.dataset.yAxisID === 'y1'
+            ? `${ctx.dataset.label}: ${(+ctx.raw).toFixed(1)}`
+            : `${ctx.dataset.label}: ${fmtInt(ctx.raw)}`
+        }}
+      },
+      scales:{
+        y:  { position:'left',  beginAtZero:true, ticks:{ callback:v => fmtInt(v) },
+              title:{ display:true, text:'НК (шт.)' } },
+        y1: { position:'right', beginAtZero:false, reverse:true,
+              suggestedMin:1, grid:{ display:false },
+              ticks:{ callback:v => Number(v).toFixed(0) },
+              title:{ display:true, text:'Средняя позиция (1 — топ)' },
+              display: hasPos }
+      }
+    }
+  });
+}
+
+function renderRankingBuckets(detail, legacy){
+  destroyChart('rankingBuckets');
+  const canvas = $('#chartRankingBuckets');
+  if (!canvas) return;
+
+  // Prefer the detailed schema: bucket each query by avg position into TOP-3 / TOP-10 / TOP-30 / 30+.
+  // Fall back to legacy TOP5/TOP10/TOP50 monthly counts when only those exist.
+  const buckets = ['ТОП-3','ТОП-10','ТОП-30','За ТОП-30'];
+  const colors  = { 'ТОП-3':'#16a34a', 'ТОП-10':'#65a30d', 'ТОП-30':'#d97706', 'За ТОП-30':'#94a3b8' };
+
+  let labels, dataByBucket;
+
+  if (detail.length){
+    // Group rows by month, then count keywords per bucket.
+    const byMonth = new Map();
+    for (const d of detail){
+      if (d.avgPos == null) continue;
+      if (!byMonth.has(d.month)) byMonth.set(d.month, { 'ТОП-3':0,'ТОП-10':0,'ТОП-30':0,'За ТОП-30':0 });
+      const acc = byMonth.get(d.month);
+      const p = d.avgPos;
+      if (p <= 3)       acc['ТОП-3']++;
+      else if (p <= 10) acc['ТОП-10']++;
+      else if (p <= 30) acc['ТОП-30']++;
+      else              acc['За ТОП-30']++;
+    }
+    labels = sortMonths([...byMonth.keys()]);
+    dataByBucket = Object.fromEntries(buckets.map(b => [b, labels.map(m => byMonth.get(m)[b])]));
+  } else {
+    // Legacy: derive disjoint buckets from cumulative TOP-N counts so the stack reads naturally.
+    const ordered = [...legacy].sort((a,b) => monthSortIdx(a.month) - monthSortIdx(b.month));
+    labels = ordered.map(d => d.month);
+    const t5  = ordered.map(d => +d.top5  || 0);
+    const t10 = ordered.map(d => +d.top10 || 0);
+    const t50 = ordered.map(d => +d.top50 || 0);
+    dataByBucket = {
+      'ТОП-3':     t5,                                                     // approximate ТОП-3 ≈ ТОП-5 counts
+      'ТОП-10':    t10.map((v,i) => Math.max(0, v - t5[i])),
+      'ТОП-30':    t50.map((v,i) => Math.max(0, v - t10[i])),              // counts in ТОП-50 but outside ТОП-10
+      'За ТОП-30': labels.map(() => 0),
+    };
+  }
+
+  const datasets = buckets.map(b => ({
+    label: b, data: dataByBucket[b],
+    backgroundColor: colors[b], borderColor: colors[b], borderWidth:1, stack:'pos'
+  }));
+
+  charts.rankingBuckets = new Chart(canvas, {
+    type:'bar',
+    data:{ labels, datasets },
+    options:{
+      responsive:true, maintainAspectRatio:false,
+      plugins:{
+        legend:{position:'bottom'},
+        tooltip:{ callbacks:{ label: ctx => `${ctx.dataset.label}: ${fmtInt(ctx.raw)} запросов` } }
+      },
+      scales:{
+        x:{ stacked:true },
+        y:{ stacked:true, beginAtZero:true, ticks:{ callback:v => fmtInt(v) },
+            title:{ display:true, text:'Кол-во запросов' } }
+      }
+    }
+  });
+}
+
+
 /* -------------------- Insights -------------------- */
 function renderInsights(){
   const rows = applyFilters(state.rows);
@@ -727,6 +1230,67 @@ function renderInsights(){
     if (d != null){
       const sign = d>=0 ? 'выросло' : 'снизилось';
       li(ul, `📈 За период ${esc(a.month)} → ${esc(b.month)} количество НК ${sign} на <b>${fmtDelta(d)}</b> (${fmtInt(a.nk)} → ${fmtInt(b.nk)}).`);
+    }
+  }
+
+  // 4. Positions ↔ NK correlation alert (cross-module: Позиции + Воронка)
+  // Scans the detailed positions sheet for clusters whose avg position improved
+  // most month-over-month and ties that to the parallel change in total НК.
+  const detail = state.positionsDetail || [];
+  if (detail.length && monthly.length >= 2){
+    const m1 = monthly[monthly.length-2].month;
+    const m2 = monthly[monthly.length-1].month;
+    const byCluster = new Map();
+    for (const d of detail){
+      if (d.avgPos == null || !d.cluster) continue;
+      if (d.month !== m1 && d.month !== m2) continue;
+      if (!byCluster.has(d.cluster)) byCluster.set(d.cluster, {});
+      byCluster.get(d.cluster)[d.month] = d;
+    }
+    let best = null;
+    for (const [name, pair] of byCluster.entries()){
+      if (!pair[m1] || !pair[m2]) continue;
+      const dPos = pair[m1].avgPos - pair[m2].avgPos; // positive = поднялись
+      if (best == null || dPos > best.dPos){ best = { name, dPos, before:pair[m1].avgPos, after:pair[m2].avgPos, engine: pair[m2].engine }; }
+    }
+    if (best && best.dPos > 0.5){
+      const dNk = monthly[monthly.length-1].nk - monthly[monthly.length-2].nk;
+      const dV  = monthly[monthly.length-1].visits - monthly[monthly.length-2].visits;
+      const trafGrowth = monthly[monthly.length-2].visits ? dV / monthly[monthly.length-2].visits : null;
+      const tgTxt = trafGrowth != null ? ` Трафик: ${fmtDelta(trafGrowth)}.` : '';
+      const nkTxt = dNk > 0
+        ? ` Это совпало с приростом <b>+${fmtInt(dNk)}</b> Новых Клиентов.`
+        : ` При этом база НК изменилась на <b>${dNk>=0?'+':''}${fmtInt(dNk)}</b>.`;
+      const engineTxt = best.engine ? ` (${esc(best.engine)})` : '';
+      li(ul, `🚀 Мы выросли${engineTxt} по кластеру <b>${esc(best.name)}</b>: средняя позиция улучшилась с ${best.before.toFixed(1)} до ${best.after.toFixed(1)} (${m1} → ${m2}).${tgTxt}${nkTxt}`);
+    }
+  }
+
+  // 5. Best-AR socdem segment (cross-module: Соц-дем + Воронка)
+  const sd = state.socdemFunnel || [];
+  if (sd.length){
+    const segs = sd
+      .map(r => ({ ...r, gender: normGender(r.gender), age: normAgeBucket(r.age), device: normDevice(r.device) }))
+      .filter(r => r.ar != null && (r.reqs == null || r.reqs >= 5));
+    if (segs.length){
+      segs.sort((a,b) => b.ar - a.ar);
+      const top = segs[0];
+      const label = [top.gender, top.age, top.device].filter(Boolean).join(', ');
+      if (label){
+        li(ul, `🎯 Сегмент <b>${esc(label)}</b> показывает самый высокий AR — <b>${fmtPct(top.ar)}</b>${top.nk?` (${fmtInt(top.nk)} НК)`:''}. Рекомендуется адаптировать посадочные страницы и креативы под эту аудиторию.`);
+      }
+    }
+
+    // 6. Mobile funnel warning: high traffic share but low AR vs Desktop.
+    const byDev = aggSocdemBy(sd.map(r => ({...r, device: normDevice(r.device)})).filter(r => r.device), r => r.device);
+    const mob = byDev.get('Mobile'), desk = byDev.get('Desktop');
+    if (mob && desk && mob.visits && desk.visits){
+      const totalV = mob.visits + desk.visits + (byDev.get('Tablet')?.visits || 0);
+      const mobShare = mob.visits / totalV;
+      if (mob.ar != null && desk.ar != null && desk.ar > 0 && mob.ar < desk.ar * 0.7 && mobShare > 0.4){
+        const factor = (desk.ar / mob.ar).toFixed(1);
+        li(ul, `🚨 Внимание: доля мобильного трафика — <b>${(mobShare*100).toFixed(0)}%</b>, но AR на Mobile (<b>${fmtPct(mob.ar)}</b>) в ${factor}× ниже Desktop (<b>${fmtPct(desk.ar)}</b>). Требуется проверка мобильной воронки и UX лендингов.`);
+      }
     }
   }
 }
@@ -819,6 +1383,8 @@ function renderAll(){
   renderTrend();
   renderCombo();
   renderProducts();
+  renderAudience();
+  renderRanking();
   renderPositions();
   renderSocdem();
   renderInsights();
@@ -838,8 +1404,10 @@ function ingestArrayBuffer(buf, name){
     const rows = normalize(parsed.main);
     if (!rows.length) throw new Error('После очистки не осталось строк (проверьте поле "Месяц").');
     state.rows = rows;
-    state.positions = parsed.positions || [];
-    state.socdem = parsed.socdem || [];
+    state.positions       = parsed.positions       || [];
+    state.positionsDetail = parsed.positionsDetail || [];
+    state.socdem          = parsed.socdem          || [];
+    state.socdemFunnel    = parsed.socdemFunnel    || [];
     state.fileName = name;
     state.filters = { months:[], sources:[], pages:[] };
     saveState();
@@ -885,6 +1453,16 @@ function init(){
   });
   $('#btnExport').addEventListener('click', exportData);
   $('#btnClearFilters').addEventListener('click', clearFilters);
+
+  // Heatmap metric toggle (Аудитория)
+  document.addEventListener('change', e => {
+    const t = e.target;
+    if (t && t.name === 'heatMetric'){
+      state.ui.heatMetric = t.value;
+      saveState();
+      renderAudience();
+    }
+  });
 
   if (loadState()) renderAll();
   else tryLoadDefault();

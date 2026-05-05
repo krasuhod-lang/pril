@@ -106,6 +106,62 @@
     <ul id="insightsList"></ul>
   </section>
 
+  <!-- 4.4a Аудитория (соц-дем сегменты воронки) -->
+  <section id="sectionAudience" class="card" hidden>
+    <div class="grid-head">
+      <h3>Аудитория · Соц-дем портрет</h3>
+      <span class="muted small">кто конвертируется в Новых Клиентов с лучшим Approve Rate</span>
+    </div>
+    <div class="audience-grid">
+      <div class="audience-block">
+        <h4>Портрет идеального клиента <span class="muted small">(тепловая карта Пол × Возраст)</span></h4>
+        <div class="heatmap-controls">
+          <label class="radio"><input type="radio" name="heatMetric" value="ar" checked> по AR (Approve Rate)</label>
+          <label class="radio"><input type="radio" name="heatMetric" value="nk"> по НК (Новые клиенты)</label>
+        </div>
+        <div id="heatmap" class="heatmap"></div>
+        <p class="chart-note">Чем темнее ячейка, тем выше выбранный показатель. Самый «жирный» сегмент — это ваша платёжеспособная аудитория.</p>
+      </div>
+      <div class="audience-block">
+        <h4>Эффективность устройств <span class="muted small">(Mobile / Desktop / Tablet)</span></h4>
+        <div class="device-grid">
+          <div class="device-cell">
+            <div class="chart-wrap chart-wrap-sm"><canvas id="chartDeviceShare"></canvas></div>
+            <p class="chart-note">Доля визитов по типам устройств.</p>
+          </div>
+          <div class="device-cell">
+            <div class="chart-wrap chart-wrap-sm"><canvas id="chartDeviceCr"></canvas></div>
+            <p class="chart-note">CR (визит → заявка) и AR (заявка → НК) по устройствам.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="grid-wrap" style="margin-top:12px">
+      <table id="audienceTable" class="mini-table"></table>
+    </div>
+  </section>
+
+  <!-- 4.4b SEO-Ранжирование (позиции ↔ НК) -->
+  <section id="sectionRanking" class="card" hidden>
+    <div class="grid-head">
+      <h3>SEO-Ранжирование · Позиции ↔ Новые Клиенты</h3>
+      <span class="muted small">причинно-следственная связь между ростом позиций и ростом базы НК</span>
+    </div>
+    <div class="ranking-grid">
+      <div class="ranking-block">
+        <h4>Корреляция «Позиции ↔ НК» <span class="muted small">(столбцы — НК, линия — средняя позиция, инвертированная)</span></h4>
+        <div class="ranking-controls" id="rankingEngineFilter"></div>
+        <div class="chart-wrap"><canvas id="chartRankingCorr"></canvas></div>
+        <p class="chart-note">Как только средняя позиция поднимается (линия идёт вверх), число НК (столбцы) растёт следом.</p>
+      </div>
+      <div class="ranking-block">
+        <h4>Распределение запросов по ТОПам <span class="muted small">(ТОП-3 / ТОП-10 / ТОП-30 / За ТОП-30)</span></h4>
+        <div class="chart-wrap"><canvas id="chartRankingBuckets"></canvas></div>
+        <p class="chart-note">Чем больше доля «зелёного» (ТОП-3), тем больше бесплатного трафика и потенциальных НК.</p>
+      </div>
+    </div>
+  </section>
+
   <!-- 4.5 Search positions (Позиции) -->
   <section id="sectionPositions" class="card" hidden>
     <div class="grid-head">
