@@ -21,6 +21,8 @@ const SOURCE_COLORS = { 'Яндекс':'#fc3f1d', 'Google':'#4285f4', 'Organic':
 
 let state = {
   rows: [],            // normalized rows
+  positions: [],       // [{ month, top5, top10, top50, ai }]
+  socdem: [],          // [{ segment, gender, age, geo, interests, loan, visits, cr }]
   fileName: '',
   filters: { months: [], sources: [], pages: [] }
 };
@@ -80,8 +82,73 @@ function parseWorkbook(arrayBuffer){
   const isSpec = s => s.json[0] && Object.keys(s.json[0]).some(k => /Источник трафика/i.test(k))
                      && Object.keys(s.json[0]).some(k => /НК/i.test(k));
   const target = sheets.find(isSpec) || sheets.find(s => /metrics/i.test(s.name)) || sheets[0];
-  return target.json;
+
+  // Optional auxiliary sheets — looked up by name (case-insensitive).
+  const findSheet = re => sheets.find(s => re.test(s.name));
+  const positionsSheet = findSheet(/позици|positions?/i);
+  const socdemSheet    = findSheet(/socdem|соцдем|соц-дем/i);
+
+  return {
+    main: target.json,
+    positions: positionsSheet ? parsePositions(wb.Sheets[positionsSheet.name]) : [],
+    socdem:    socdemSheet    ? parseSocdem(wb.Sheets[socdemSheet.name])       : [],
+  };
 }
+
+function parsePositions(sheet){
+  // First column may be unnamed (month). Read as a 2-D array to be robust to header naming.
+  const aoa = XLSX.utils.sheet_to_json(sheet, { header:1, defval:null, raw:true });
+  if (!aoa.length) return [];
+  const header = aoa[0].map(h => h == null ? '' : String(h).trim());
+  const idx = {
+    top5:  header.findIndex(h => /топ\s*5\b/i.test(h)),
+    top10: header.findIndex(h => /топ\s*10\b/i.test(h)),
+    top50: header.findIndex(h => /топ\s*50\b/i.test(h)),
+    ai:    header.findIndex(h => /ии|ai|нейросет/i.test(h)),
+  };
+  const out = [];
+  for (let i = 1; i < aoa.length; i++){
+    const row = aoa[i] || [];
+    const month = monthKey(row[0]);
+    if (!month) continue;
+    out.push({
+      month,
+      top5:  idx.top5  >= 0 ? toNumber(row[idx.top5])  : null,
+      top10: idx.top10 >= 0 ? toNumber(row[idx.top10]) : null,
+      top50: idx.top50 >= 0 ? toNumber(row[idx.top50]) : null,
+      ai:    idx.ai    >= 0 ? toNumber(row[idx.ai])    : null,
+    });
+  }
+  return out;
+}
+
+function parseSocdem(sheet){
+  const json = XLSX.utils.sheet_to_json(sheet, { defval:null, raw:true });
+  const out = [];
+  for (const r of json){
+    const seg = pickField(r, /сегмент|segment/i);
+    if (seg == null || String(seg).trim() === '') continue;
+    out.push({
+      segment:   String(seg).trim(),
+      gender:    str(pickField(r, /^пол$|gender/i)),
+      age:       str(pickField(r, /возраст|age/i)),
+      geo:       str(pickField(r, /географ|geo|регион|город/i)),
+      interests: str(pickField(r, /интерес/i)),
+      loan:      str(pickField(r, /займ|кредит|loan/i)),
+      visits:    str(pickField(r, /визит/i)),
+      cr:        str(pickField(r, /конверс|^cr$/i)),
+    });
+  }
+  return out;
+}
+
+function pickField(row, re){
+  for (const k of Object.keys(row)){
+    if (re.test(String(k))) return row[k];
+  }
+  return null;
+}
+function str(v){ return v == null ? '' : String(v).trim(); }
 
 function normalize(raw){
   // Drop rows with empty Месяц
@@ -197,6 +264,8 @@ function loadState(){
     const parsed = JSON.parse(s);
     if (parsed && Array.isArray(parsed.rows) && parsed.rows.length){
       state = Object.assign(state, parsed);
+      state.positions = Array.isArray(parsed.positions) ? parsed.positions : [];
+      state.socdem    = Array.isArray(parsed.socdem)    ? parsed.socdem    : [];
       state.filters = Object.assign({months:[],sources:[],pages:[]}, parsed.filters||{});
       return true;
     }
@@ -205,7 +274,7 @@ function loadState(){
 }
 function clearState(){
   localStorage.removeItem(LS_KEY);
-  state = { rows:[], fileName:'', filters:{months:[],sources:[],pages:[]} };
+  state = { rows:[], positions:[], socdem:[], fileName:'', filters:{months:[],sources:[],pages:[]} };
 }
 
 /* -------------------- Filters UI -------------------- */
@@ -500,6 +569,123 @@ function renderProducts(){
   });
 }
 
+/* -------------------- Positions (search rankings) -------------------- */
+function renderPositions(){
+  destroyChart('positions');
+  const section = $('#sectionPositions');
+  const data = state.positions || [];
+  if (!data.length){ if (section) section.hidden = true; return; }
+  if (section) section.hidden = false;
+
+  // Order by calendar months we know about; keep unknown months in original order.
+  const ordered = [...data].sort((a,b) => monthSortIdx(a.month) - monthSortIdx(b.month));
+  const labels = ordered.map(d => d.month);
+
+  // KPI mini-cards: show last month value and delta vs previous month for each series.
+  const last = ordered[ordered.length-1] || {};
+  const prev = ordered[ordered.length-2] || {};
+  const series = [
+    { key:'top5',  label:'ТОП-5',           color:'#16a34a' },
+    { key:'top10', label:'ТОП-10',          color:'#2563eb' },
+    { key:'top50', label:'ТОП-50',          color:'#7c3aed' },
+    { key:'ai',    label:'Упоминания в ИИ', color:'#d97706' },
+  ];
+  const kpiHost = $('#positionsKpis');
+  kpiHost.innerHTML = series.map(s => {
+    const cur = last[s.key], pr = prev[s.key];
+    const d = (cur != null && pr != null && pr !== 0) ? (cur - pr) / Math.abs(pr) : null;
+    const cls = d == null ? 'flat' : d > 0.001 ? 'up' : d < -0.001 ? 'down' : 'flat';
+    const arrow = cls==='up'?'▲':cls==='down'?'▼':'▬';
+    const dTxt = d == null ? '' : `${arrow} ${fmtDelta(d)}`;
+    return `<div class="pos-kpi"><span class="dot" style="background:${s.color}"></span>
+      <div class="pos-kpi-body">
+        <div class="pos-kpi-label">${esc(s.label)}</div>
+        <div class="pos-kpi-value">${fmtInt(cur)}</div>
+        <div class="kpi-delta ${cls}">${dTxt}</div>
+      </div></div>`;
+  }).join('');
+
+  // Two y-axes: left for ТОП-5/10/50 (counts of keywords), right for AI mentions.
+  const datasets = [
+    ...series.slice(0,3).map(s => ({
+      type:'line', label:s.label, data: ordered.map(d => d[s.key]),
+      borderColor:s.color, backgroundColor:s.color+'cc',
+      borderWidth:2, tension:.3, pointRadius:4, yAxisID:'y'
+    })),
+    { type:'bar', label:'Упоминания в ИИ',
+      data: ordered.map(d => d.ai),
+      backgroundColor:'#d97706cc', borderColor:'#d97706', borderWidth:1,
+      yAxisID:'y1' }
+  ];
+
+  charts.positions = new Chart($('#chartPositions'), {
+    data:{ labels, datasets },
+    options:{
+      responsive:true, maintainAspectRatio:false,
+      plugins:{ legend:{ position:'bottom' } },
+      scales:{
+        y:  { position:'left',  beginAtZero:true, ticks:{ callback:v => fmtInt(v) },
+              title:{display:true, text:'Кол-во ключевых запросов'} },
+        y1: { position:'right', beginAtZero:true, grid:{display:false},
+              ticks:{ callback:v => fmtInt(v) },
+              title:{display:true, text:'Упоминания в ИИ'} }
+      }
+    }
+  });
+
+  // Detailed table.
+  const tbl = $('#positionsTable');
+  tbl.innerHTML =
+    '<thead><tr><th class="txt">Месяц</th><th>ТОП-5</th><th>ТОП-10</th><th>ТОП-50</th><th>Упоминания в ИИ</th></tr></thead>' +
+    '<tbody>' + ordered.map(d => `<tr>
+      <td class="txt">${esc(d.month)}</td>
+      <td>${fmtInt(d.top5)}</td>
+      <td>${fmtInt(d.top10)}</td>
+      <td>${fmtInt(d.top50)}</td>
+      <td>${fmtInt(d.ai)}</td>
+    </tr>`).join('') + '</tbody>';
+}
+
+/* -------------------- Socdem (segment portraits) -------------------- */
+function renderSocdem(){
+  const section = $('#sectionSocdem');
+  const data = state.socdem || [];
+  if (!data.length){ if (section) section.hidden = true; return; }
+  if (section) section.hidden = false;
+
+  // Colour per known segment to keep it visually consistent with the rest of the dashboard.
+  const segColors = {
+    'Прогретые':       '#16a34a',
+    'Присматриваются': '#2563eb',
+    'Сыкуны':          '#dc2626',
+  };
+
+  const host = $('#socdemCards');
+  host.innerHTML = data.map(d => {
+    const color = segColors[d.segment] || '#7c3aed';
+    const geo = d.geo
+      ? d.geo.split(/\s*,\s*/).filter(Boolean).map(g => `<span class="tag">${esc(g)}</span>`).join('')
+      : '';
+    const interests = d.interests
+      ? d.interests.split(/\s*,\s*/).filter(Boolean).map(g => `<span class="tag tag-soft">${esc(g)}</span>`).join('')
+      : '';
+    return `
+      <article class="socdem-card" style="--seg:${color}">
+        <header class="socdem-head">
+          <div class="socdem-seg">${esc(d.segment)}</div>
+          <div class="socdem-gender">${esc(d.gender)}${d.age ? ' · '+esc(d.age) : ''}</div>
+        </header>
+        <dl class="socdem-grid">
+          ${geo ? `<div class="socdem-row"><dt>География</dt><dd class="tags">${geo}</dd></div>` : ''}
+          ${interests ? `<div class="socdem-row"><dt>Интересы</dt><dd class="tags">${interests}</dd></div>` : ''}
+          ${d.loan ? `<div class="socdem-row"><dt>Типичный займ</dt><dd>${esc(d.loan)}</dd></div>` : ''}
+          ${d.visits ? `<div class="socdem-row"><dt>Визитов до заявки</dt><dd>${esc(d.visits)}</dd></div>` : ''}
+          ${d.cr ? `<div class="socdem-row"><dt>Конверсия в договор</dt><dd><b>${esc(d.cr)}</b></dd></div>` : ''}
+        </dl>
+      </article>`;
+  }).join('');
+}
+
 /* -------------------- Insights -------------------- */
 function renderInsights(){
   const rows = applyFilters(state.rows);
@@ -633,6 +819,8 @@ function renderAll(){
   renderTrend();
   renderCombo();
   renderProducts();
+  renderPositions();
+  renderSocdem();
   renderInsights();
   renderGrid();
   $('#srcName').textContent = state.fileName || '—';
@@ -646,10 +834,12 @@ async function loadFile(file){
 }
 function ingestArrayBuffer(buf, name){
   try {
-    const raw = parseWorkbook(buf);
-    const rows = normalize(raw);
+    const parsed = parseWorkbook(buf);
+    const rows = normalize(parsed.main);
     if (!rows.length) throw new Error('После очистки не осталось строк (проверьте поле "Месяц").');
     state.rows = rows;
+    state.positions = parsed.positions || [];
+    state.socdem = parsed.socdem || [];
     state.fileName = name;
     state.filters = { months:[], sources:[], pages:[] };
     saveState();
