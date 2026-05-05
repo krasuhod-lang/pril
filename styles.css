@@ -77,3 +77,41 @@ table#dataGrid thead th .arr{color:var(--muted);margin-left:4px;font-size:10px}
 table#dataGrid tbody tr:hover{background:#f8fafc}
 
 .footer{padding:8px 4px}
+
+/* Positions block */
+.positions-kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));
+  gap:12px;margin-bottom:14px}
+.pos-kpi{display:flex;align-items:center;gap:10px;padding:10px 12px;
+  border:1px solid var(--line);border-radius:10px;background:#f8fafc}
+.pos-kpi .dot{width:10px;height:10px;border-radius:50%;flex:none}
+.pos-kpi-body{display:flex;flex-direction:column;gap:2px;min-width:0}
+.pos-kpi-label{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+.pos-kpi-value{font-size:20px;font-weight:700}
+
+table.mini-table{width:100%;border-collapse:collapse;font-size:13px;background:#fff}
+table.mini-table th, table.mini-table td{padding:6px 10px;
+  border-bottom:1px solid var(--line);text-align:right;white-space:nowrap}
+table.mini-table th.txt, table.mini-table td.txt{text-align:left}
+table.mini-table thead th{background:#f8fafc;font-weight:600;
+  border-bottom:2px solid var(--line);position:sticky;top:0}
+
+/* Socdem block */
+.socdem-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:14px;margin-top:8px}
+.socdem-card{border:1px solid var(--line);border-left:4px solid var(--seg, var(--brand));
+  border-radius:10px;padding:14px 16px;background:#fff}
+.socdem-head{display:flex;align-items:baseline;justify-content:space-between;
+  gap:10px;margin-bottom:10px}
+.socdem-seg{font-weight:700;font-size:15px;color:var(--seg, var(--ink))}
+.socdem-gender{color:var(--muted);font-size:13px}
+.socdem-grid{margin:0;display:grid;gap:8px}
+.socdem-row{display:grid;grid-template-columns:130px 1fr;gap:10px;align-items:start}
+.socdem-row dt{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.04em}
+.socdem-row dd{margin:0;font-size:13px;line-height:1.4}
+.socdem-row dd.tags{display:flex;flex-wrap:wrap;gap:4px}
+.tag{display:inline-block;padding:2px 8px;border-radius:999px;
+  background:#eef2ff;color:#3730a3;font-size:11px;border:1px solid #e0e7ff}
+.tag-soft{background:#f1f5f9;color:#334155;border-color:#e2e8f0}
+@media (max-width:640px){
+  .socdem-row{grid-template-columns:1fr}
+  .socdem-row dt{font-size:11px}
+}
